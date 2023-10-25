@@ -2,40 +2,48 @@ using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.InputSystem;
+using UnityEngine.SceneManagement;
 
 [RequireComponent(typeof(CharacterController))]
 [RequireComponent(typeof(Animator))]
 public class PlayerMovementController : MonoBehaviour
 {
-    private PlayerInput _playerInput;
-    private CharacterController _characterController;
+    [Header("Components")]
+    public PlayerInput _playerInput = null;
+    private CharacterController _characterController = null;
+
 
     [Header("Movement")]
     private Vector2 _currentMovementInput;
     private Vector3 _currentMovement;
-    private bool _isMovementPressed;
+    private Vector3 _appliedMovement;
+    private bool _isMovementPressed = false;
 
     private float _gravity = -9.8f;
     private float _groundedGravity = -0.05f;
 
     [SerializeField] private float _rotationFactorPerFrame = 15f;
 
+
     [Header("Running")]
     private Vector3 _currentRunMovement;
-    private bool _isRunPressed;
+    private bool _isRunPressed = false;
 
-    [SerializeField] private float _runMultiplier = 3f;
+    [SerializeField] private float _walkMultiplier = 3f;
+    [SerializeField] private float _runMultiplier = 6f;
+
 
     [Header("Jumping")]
     private bool _isJumpPressed = false;
     private float _initialJumpVelocity;
-    [SerializeField] private float _maxJumpHeight = 6f;
+    [SerializeField] private float _maxJumpHeight = 2f;
     [SerializeField] private float _maxJumpTime = 0.75f;
     private bool _isJumping = false;
     [SerializeField] private float _fallMultiplier = 2f;
     [SerializeField] private float _maxVelocityInFall = -20f;
 
-    private int _jumpCount = 0;
+    private int _chainedJumpsCount = 0;
+    [SerializeField, Range(1, 3)] private int _maxChainedJumpsCount = 3;
     private Dictionary<int, float> _initialJumpVelocities = new Dictionary<int, float>();
     private Dictionary<int, float> _jumpGravities = new Dictionary<int, float>();
 
@@ -120,8 +128,8 @@ public class PlayerMovementController : MonoBehaviour
     {
         _currentMovementInput = context.ReadValue<Vector2>();
 
-        _currentMovement.x = _currentMovementInput.x;
-        _currentMovement.z = _currentMovementInput.y;
+        _currentMovement.x = _currentMovementInput.x * _walkMultiplier;
+        _currentMovement.z = _currentMovementInput.y * _walkMultiplier;
 
         _currentRunMovement.x = _currentMovementInput.x * _runMultiplier;
         _currentRunMovement.z = _currentMovementInput.y * _runMultiplier;
@@ -189,12 +197,16 @@ public class PlayerMovementController : MonoBehaviour
     {
         if (_isRunPressed)
         {
-            _characterController.Move(_currentRunMovement * Time.deltaTime);
+            _appliedMovement.x = _currentRunMovement.x;
+            _appliedMovement.z = _currentRunMovement.z;
         }
         else
         {
-            _characterController.Move(_currentMovement * Time.deltaTime);
+            _appliedMovement.x = _currentMovement.x;
+            _appliedMovement.z = _currentMovement.z;
         }
+
+        _characterController.Move(_appliedMovement * Time.deltaTime);
     }
 
     private void HandleJump()
@@ -206,7 +218,7 @@ public class PlayerMovementController : MonoBehaviour
 
         if (!_isJumping && _isJumpPressed)
         {
-            if (_jumpCount < 3 && _currentJumpResetRoutine != null)
+            if (_chainedJumpsCount < _maxChainedJumpsCount && _currentJumpResetRoutine != null)
             {
                 StopCoroutine(_currentJumpResetRoutine);
             }
@@ -215,11 +227,11 @@ public class PlayerMovementController : MonoBehaviour
             _isJumpAnimating = true;
 
             _isJumping = true;
-            _jumpCount++;
-            _animator.SetInteger(s_jumpCountHash, _jumpCount);
+            _chainedJumpsCount++;
+            _animator.SetInteger(s_jumpCountHash, _chainedJumpsCount);
 
-            _currentMovement.y = _initialJumpVelocities[_jumpCount] * 0.5f;
-            _currentRunMovement.y = _initialJumpVelocities[_jumpCount] * 0.5f;
+            _currentMovement.y = _initialJumpVelocities[_chainedJumpsCount];
+            _appliedMovement.y = _initialJumpVelocities[_chainedJumpsCount];
         }
         else if (_isJumping && !_isJumpPressed)
         {
@@ -230,7 +242,27 @@ public class PlayerMovementController : MonoBehaviour
     IEnumerator JumpResetRoutine()
     {
         yield return new WaitForSeconds(0.5f);
-        _jumpCount = 0;
+        _chainedJumpsCount = 0;
+    }
+
+    private float VelocityVerletIntegration(bool isFalling)
+    {
+        float previousYVelocity = _currentMovement.y;
+        float acceleration = _jumpGravities[_chainedJumpsCount] * Time.deltaTime;
+        if (isFalling)
+        {
+            acceleration *= _fallMultiplier;
+        }
+
+        _currentMovement.y += acceleration;
+
+        float nextYVelocity = (previousYVelocity + _currentMovement.y) * 0.5f;
+        if (isFalling)
+        {
+            nextYVelocity = Mathf.Max(nextYVelocity, _maxVelocityInFall);
+        }
+
+        return nextYVelocity;
     }
 
     private void HandleGravity()
@@ -245,36 +277,19 @@ public class PlayerMovementController : MonoBehaviour
                 _isJumpAnimating = false;
 
                 _currentJumpResetRoutine = StartCoroutine(JumpResetRoutine());
-                if (_jumpCount == 3)
+                if (_chainedJumpsCount == _maxChainedJumpsCount)
                 {
-                    _jumpCount = 0;
-                    _animator.SetInteger(s_jumpCountHash, _jumpCount);
+                    _chainedJumpsCount = 0;
+                    _animator.SetInteger(s_jumpCountHash, _chainedJumpsCount);
                 }
             }
 
             _currentMovement.y = _groundedGravity;
-            _currentRunMovement.y = _groundedGravity;
+            _appliedMovement.y = _groundedGravity;
         }
         else
         {
-            float previousYVelocity = _currentMovement.y;
-
-            float acceleration = _jumpGravities[_jumpCount] * Time.deltaTime;
-            if (isFalling)
-            {
-                acceleration *= _fallMultiplier;
-            }
-
-            float newYVelocity = _currentMovement.y + acceleration;
-
-            float nextYVelocity = (previousYVelocity + newYVelocity) * 0.5f;
-            if (isFalling)
-            {
-                nextYVelocity = Mathf.Max(nextYVelocity, _maxVelocityInFall);
-            }
-
-            _currentMovement.y = nextYVelocity;
-            _currentRunMovement.y = nextYVelocity;
+            _appliedMovement.y = VelocityVerletIntegration(isFalling);
         }
     }
 }
